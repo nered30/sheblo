@@ -1,607 +1,904 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>댓글 광장</title>
-    <div style="display:none;"> <iframe width="0" height="0" 
-        src="https://www.youtube.com/embed/SiQYxXFLDT0?autoplay=1&mute=1&loop=1&playlist=SiQYxXFLDT0" 
-        frameborder="0" allow="autoplay">
-    </iframe>
-</div>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>쉐블로</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
 
-<p>배경음악이 재생 중입니다. (브라우저 정책에 따라 음소거로 시작될 수 있습니다.)</p>
-    <div id="player" style="display:none;"></div>
+<!-- ====================================================
+  FIREBASE 설정 방법:
+  1. https://console.firebase.google.com 에서 프로젝트 생성
+  2. Firestore Database 활성화 (테스트 모드로 시작)
+  3. Authentication > 이메일/비밀번호 로그인 활성화
+  4. Storage 활성화
+  5. 프로젝트 설정 > 앱 추가 > 웹 앱
+  6. 아래 firebaseConfig 값을 본인 값으로 교체
+===================================================== -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, collection, addDoc, getDocs, getDoc, doc, updateDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, increment, arrayUnion, arrayRemove, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
 
-<script src="https://www.youtube.com/iframe_api"></script>
-<script>
-  let player;
-  function onYouTubeIframeAPIReady() {
-    player = new YT.Player('player', {
-      height: '0',
-      width: '0',
-      videoId: 'SiQYxXFLDT0', // 대홍단 감자 ID
-      playerVars: { 'autoplay': 1, 'mute': 1, 'loop': 1, 'playlist': 'SiQYxXFLDT0' },
-      events: {
-        'onReady': (event) => {
-          event.target.playVideo();
-          // 사용자가 화면 아무데나 클릭하면 음소거 해제
-          window.addEventListener('click', () => {
-            player.unMute();
-          }, { once: true });
-        }
-      }
+  // ★ 여기를 본인 Firebase 설정으로 교체하세요 ★
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const storage = getStorage(app);
+
+  // ─── 전역 상태 ───
+  const SITE_NAME = "쉐블로";
+  let currentUser = null;
+  let currentPage = "share";
+  let activeChatRoom = null;
+  let chatUnsubscribe = null;
+  let isDark = localStorage.getItem("theme") === "dark";
+
+  // ─── 초기화 ───
+  window.addEventListener("DOMContentLoaded", () => {
+    applyTheme();
+    document.title = SITE_NAME;
+    document.getElementById("site-name").textContent = SITE_NAME;
+    onAuthStateChanged(auth, user => {
+      currentUser = user;
+      renderAuthUI();
+      renderPage(currentPage);
+    });
+    setupNavClicks();
+  });
+
+  // ─── 테마 ───
+  function applyTheme() {
+    document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
+  }
+  window.toggleTheme = () => {
+    isDark = !isDark;
+    localStorage.setItem("theme", isDark ? "dark" : "light");
+    applyTheme();
+    document.getElementById("theme-toggle-label").textContent = isDark ? "다크 모드" : "라이트 모드";
+  };
+
+  // ─── 인증 UI ───
+  function renderAuthUI() {
+    const el = document.getElementById("auth-area");
+    if (currentUser) {
+      el.innerHTML = `<span class="user-chip">${currentUser.displayName || currentUser.email.split("@")[0]}</span>
+        <button class="btn-sm" onclick="doSignOut()">로그아웃</button>`;
+    } else {
+      el.innerHTML = `<button class="btn-sm" onclick="openModal('login-modal')">로그인</button>
+        <button class="btn-sm primary" onclick="openModal('register-modal')">회원가입</button>`;
+    }
+  }
+
+  window.doSignOut = async () => {
+    await signOut(auth);
+  };
+
+  window.doLogin = async () => {
+    const id = document.getElementById("login-id").value.trim();
+    const pw = document.getElementById("login-pw").value;
+    const err = document.getElementById("login-err");
+    if (!id || !pw) { err.textContent = "아이디와 비밀번호를 입력하세요."; return; }
+    try {
+      const email = id.includes("@") ? id : id + "@shevlo.local";
+      await signInWithEmailAndPassword(auth, email, pw);
+      closeModal("login-modal");
+      err.textContent = "";
+    } catch (e) {
+      err.textContent = "아이디 또는 비밀번호가 틀렸습니다.";
+    }
+  };
+
+  window.doRegister = async () => {
+    const id = document.getElementById("reg-id").value.trim();
+    const pw = document.getElementById("reg-pw").value;
+    const pw2 = document.getElementById("reg-pw2").value;
+    const err = document.getElementById("reg-err");
+    if (!id || !pw) { err.textContent = "아이디와 비밀번호를 입력하세요."; return; }
+    if (pw !== pw2) { err.textContent = "비밀번호가 일치하지 않습니다."; return; }
+    if (pw.length < 6) { err.textContent = "비밀번호는 6자 이상이어야 합니다."; return; }
+    try {
+      const email = id + "@shevlo.local";
+      const cred = await createUserWithEmailAndPassword(auth, email, pw);
+      await updateProfile(cred.user, { displayName: id });
+      closeModal("register-modal");
+      err.textContent = "";
+    } catch (e) {
+      if (e.code === "auth/email-already-in-use") err.textContent = "이미 사용 중인 아이디입니다.";
+      else err.textContent = "회원가입에 실패했습니다.";
+    }
+  };
+
+  // ─── 네비게이션 ───
+  function setupNavClicks() {
+    document.querySelectorAll(".nav-item[data-page]").forEach(el => {
+      el.addEventListener("click", () => {
+        setActivePage(el.dataset.page);
+      });
     });
   }
+
+  function setActivePage(page) {
+    currentPage = page;
+    if (chatUnsubscribe) { chatUnsubscribe(); chatUnsubscribe = null; activeChatRoom = null; }
+    document.querySelectorAll(".nav-item[data-page]").forEach(n => n.classList.remove("active"));
+    const nav = document.querySelector(`.nav-item[data-page="${page}"]`);
+    if (nav) nav.classList.add("active");
+    renderPage(page);
+  }
+
+  async function renderPage(page) {
+    const main = document.getElementById("main-content");
+    main.innerHTML = `<div class="loading">불러오는 중...</div>`;
+    switch(page) {
+      case "notice": await renderNotice(main); break;
+      case "share":  await renderShare(main); break;
+      case "qna":    await renderQna(main); break;
+      case "monthly":await renderMonthly(main); break;
+      case "help":   renderHelp(main); break;
+      case "chat":   await renderChatList(main); break;
+      case "settings": renderSettings(main); break;
+      default: main.innerHTML = "";
+    }
+  }
+
+  // ─── 공지 ───
+  async function renderNotice(main) {
+    const canPost = currentUser && (await isAdmin());
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title">공지</div><div class="page-sub">운영진 공지사항</div></div>
+        ${canPost ? `<button class="btn-sm primary" onclick="openWriteModal('notice')">+ 작성</button>` : ""}
+      </div>
+      <div id="notice-list"><div class="loading">불러오는 중...</div></div>`;
+    const q = query(collection(db, "posts"), where("category","==","notice"), orderBy("createdAt","desc"));
+    onSnapshot(q, snap => {
+      const el = document.getElementById("notice-list");
+      if (!el) return;
+      if (snap.empty) { el.innerHTML = `<div class="empty-state">공지사항이 없습니다</div>`; return; }
+      el.innerHTML = snap.docs.map(d => {
+        const p = d.data();
+        return `<div class="announce-card" onclick="openPost('${d.id}','notice')">
+          <span class="announce-badge">공지</span>
+          <span class="announce-title">${escHtml(p.title)}</span>
+          <span class="announce-date">${fmtDate(p.createdAt)}</span>
+        </div>`;
+      }).join("");
+    });
+  }
+
+  async function isAdmin() {
+    if (!currentUser) return false;
+    const snap = await getDoc(doc(db, "users", currentUser.uid));
+    return snap.exists() && snap.data().role === "admin";
+  }
+
+  // ─── 게임공유 ───
+  async function renderShare(main) {
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title">게임공유 (로블)</div><div class="page-sub">로블록스 게임을 공유해보세요</div></div>
+        ${currentUser ? `<button class="btn-sm primary" onclick="openWriteModal('share')">+ 게임 등록</button>` : `<button class="btn-sm" onclick="openModal('login-modal')">로그인 후 등록</button>`}
+      </div>
+      <div class="filter-bar">
+        <button class="filter-chip active" data-sort="latest">최신순</button>
+        <button class="filter-chip" data-sort="votes">추천순</button>
+        <button class="filter-chip" data-sort="views">조회순</button>
+      </div>
+      <div id="share-list"></div>`;
+
+    let sortField = "createdAt";
+    const loadGames = async (sort) => {
+      const q = query(collection(db, "posts"), where("category","==","share"), orderBy(sort,"desc"));
+      const snap = await getDocs(q);
+      const el = document.getElementById("share-list");
+      if (!el) return;
+      if (snap.empty) { el.innerHTML = `<div class="empty-state">등록된 게임이 없습니다. 첫 번째 게임을 공유해보세요!</div>`; return; }
+      el.innerHTML = snap.docs.map(d => gameCardHTML(d.id, d.data())).join("");
+    };
+    await loadGames("createdAt");
+    document.querySelectorAll(".filter-chip").forEach(c => {
+      c.addEventListener("click", async function() {
+        document.querySelectorAll(".filter-chip").forEach(x => x.classList.remove("active"));
+        this.classList.add("active");
+        const sortMap = { latest:"createdAt", votes:"totalVotes", views:"views" };
+        await loadGames(sortMap[this.dataset.sort] || "createdAt");
+      });
+    });
+  }
+
+  function gameCardHTML(id, p) {
+    const voted = currentUser && p.voters ? p.voters[currentUser.uid] : null;
+    return `<div class="game-card" onclick="openPost('${id}','share')">
+      <div class="thumb">
+        ${p.thumbnail ? `<img src="${p.thumbnail}" style="width:100%;height:100%;object-fit:cover;border-radius:var(--border-radius-md)">` : `<div class="thumb-default">No<br>Image</div>`}
+      </div>
+      <div class="game-info">
+        <div class="game-title">${escHtml(p.title)}</div>
+        <div class="game-meta">
+          <span>${escHtml(p.author || "")}</span>
+          <span class="meta-sep">|</span>
+          <a href="${p.link}" target="_blank" onclick="event.stopPropagation()" class="game-link">게임 바로가기</a>
+          <span class="meta-sep">|</span>
+          <span>조회 ${(p.views||0).toLocaleString()}</span>
+        </div>
+        <div class="game-desc">${escHtml(p.description || "")}</div>
+      </div>
+      <div class="game-actions">
+        <div class="stats-col">
+          <button class="stat-btn${voted==='idea'?' voted':''}" onclick="vote(event,'${id}','idea')" data-id="${id}" data-type="idea">
+            <div class="stat-dot dot-idea"></div>아이디어 <span>${p.idea||0}</span>
+          </button>
+          <button class="stat-btn${voted==='quality'?' voted':''}" onclick="vote(event,'${id}','quality')" data-id="${id}" data-type="quality">
+            <div class="stat-dot dot-quality"></div>퀄리티 <span>${p.quality||0}</span>
+          </button>
+          <button class="stat-btn${voted==='fun'?' voted':''}" onclick="vote(event,'${id}','fun')" data-id="${id}" data-type="fun">
+            <div class="stat-dot dot-fun"></div>재미 <span>${p.fun||0}</span>
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  window.vote = async (e, postId, type) => {
+    e.stopPropagation();
+    if (!currentUser) { openModal("login-modal"); return; }
+    const ref2 = doc(db, "posts", postId);
+    const snap = await getDoc(ref2);
+    const data = snap.data();
+    const voters = data.voters || {};
+    if (voters[currentUser.uid]) return; // 이미 투표함
+    await updateDoc(ref2, {
+      [type]: increment(1),
+      totalVotes: increment(1),
+      [`voters.${currentUser.uid}`]: type
+    });
+    await renderPage("share");
+  };
+
+  // ─── 게시물 상세 ───
+  window.openPost = async (id, category) => {
+    const snap = await getDoc(doc(db, "posts", id));
+    if (!snap.exists()) return;
+    const p = snap.data();
+    await updateDoc(doc(db, "posts", id), { views: increment(1) });
+
+    const main = document.getElementById("main-content");
+    main.innerHTML = `
+      <div class="page-header">
+        <button class="btn-sm" onclick="renderPage('${category}');setActivePage('${category}')">← 목록으로</button>
+        ${(currentUser && currentUser.uid === p.authorId) ? `<button class="btn-sm danger" onclick="deletePost('${id}','${category}')">삭제</button>` : ""}
+      </div>
+      <div class="post-detail">
+        <div class="post-title">${escHtml(p.title)}</div>
+        <div class="post-meta">
+          <span>${escHtml(p.author||"")}</span>
+          <span class="meta-sep">|</span>
+          <span>${fmtDate(p.createdAt)}</span>
+          <span class="meta-sep">|</span>
+          <span>조회 ${(p.views||0)+1}</span>
+          ${p.link ? `<span class="meta-sep">|</span><a href="${p.link}" target="_blank" class="game-link">게임 바로가기</a>` : ""}
+        </div>
+        ${p.thumbnail ? `<img src="${p.thumbnail}" class="post-thumb">` : ""}
+        <div class="post-body">${escHtml(p.description||"")}</div>
+        ${category==="share" ? `
+        <div class="vote-section">
+          <button class="vote-big${(p.voters&&p.voters[currentUser?.uid]==='idea')?' voted':''}" onclick="vote(event,'${id}','idea')">
+            <div class="vote-dot" style="background:#378ADD"></div>아이디어 <strong>${p.idea||0}</strong>
+          </button>
+          <button class="vote-big${(p.voters&&p.voters[currentUser?.uid]==='quality')?' voted':''}" onclick="vote(event,'${id}','quality')">
+            <div class="vote-dot" style="background:#1D9E75"></div>퀄리티 <strong>${p.quality||0}</strong>
+          </button>
+          <button class="vote-big${(p.voters&&p.voters[currentUser?.uid]==='fun')?' voted':''}" onclick="vote(event,'${id}','fun')">
+            <div class="vote-dot" style="background:#D4537E"></div>재미 <strong>${p.fun||0}</strong>
+          </button>
+        </div>` : ""}
+        <div class="comments-section">
+          <div class="comments-title">댓글</div>
+          <div id="comment-list"></div>
+          ${currentUser ? `
+          <div class="comment-form">
+            <input id="comment-input" class="form-input" placeholder="댓글을 입력하세요..." onkeydown="if(event.key==='Enter')addComment('${id}')">
+            <button class="btn-sm primary" onclick="addComment('${id}')">등록</button>
+          </div>` : `<div class="empty-state" style="font-size:13px">댓글을 작성하려면 <span class="link" onclick="openModal('login-modal')">로그인</span>하세요</div>`}
+        </div>
+      </div>`;
+    loadComments(id);
+  };
+
+  async function loadComments(postId) {
+    const el = document.getElementById("comment-list");
+    if (!el) return;
+    const q = query(collection(db, "posts", postId, "comments"), orderBy("createdAt","asc"));
+    onSnapshot(q, snap => {
+      if (!el) return;
+      if (snap.empty) { el.innerHTML = `<div class="empty-state" style="font-size:13px;padding:12px 0">아직 댓글이 없습니다</div>`; return; }
+      el.innerHTML = snap.docs.map(d => {
+        const c = d.data();
+        return `<div class="comment-item">
+          <span class="comment-author">${escHtml(c.author||"")}</span>
+          <span class="comment-text">${escHtml(c.text||"")}</span>
+          <span class="comment-date">${fmtDate(c.createdAt)}</span>
+          ${(currentUser && currentUser.uid === c.authorId) ? `<span class="comment-del link" onclick="deleteComment('${postId}','${d.id}')">삭제</span>` : ""}
+        </div>`;
+      }).join("");
+    });
+  }
+
+  window.addComment = async (postId) => {
+    const input = document.getElementById("comment-input");
+    const text = input.value.trim();
+    if (!text || !currentUser) return;
+    await addDoc(collection(db, "posts", postId, "comments"), {
+      text, authorId: currentUser.uid,
+      author: currentUser.displayName || currentUser.email.split("@")[0],
+      createdAt: serverTimestamp()
+    });
+    input.value = "";
+  };
+
+  window.deleteComment = async (postId, commentId) => {
+    if (!confirm("댓글을 삭제할까요?")) return;
+    await deleteDoc(doc(db, "posts", postId, "comments", commentId));
+  };
+
+  window.deletePost = async (id, category) => {
+    if (!confirm("게시물을 삭제할까요?")) return;
+    await deleteDoc(doc(db, "posts", id));
+    setActivePage(category);
+  };
+
+  // ─── 질문 ───
+  async function renderQna(main) {
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title">질문</div><div class="page-sub">로블록스 관련 질문을 해보세요</div></div>
+        ${currentUser ? `<button class="btn-sm primary" onclick="openWriteModal('qna')">+ 질문 작성</button>` : `<button class="btn-sm" onclick="openModal('login-modal')">로그인 후 작성</button>`}
+      </div>
+      <div id="qna-list"></div>`;
+    const q = query(collection(db, "posts"), where("category","==","qna"), orderBy("createdAt","desc"));
+    onSnapshot(q, snap => {
+      const el = document.getElementById("qna-list");
+      if (!el) return;
+      if (snap.empty) { el.innerHTML = `<div class="empty-state">첫 번째 질문을 작성해보세요!</div>`; return; }
+      el.innerHTML = snap.docs.map(d => {
+        const p = d.data();
+        return `<div class="list-row" onclick="openPost('${d.id}','qna')">
+          <div class="list-title">${escHtml(p.title)}</div>
+          <div class="list-meta"><span>${escHtml(p.author||"")}</span><span>${fmtDate(p.createdAt)}</span><span>조회 ${p.views||0}</span></div>
+        </div>`;
+      }).join("");
+    });
+  }
+
+  // ─── 이달의 게임 ───
+  async function renderMonthly(main) {
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title">이달의 게임</div><div class="page-sub">${new Date().getFullYear()}년 ${new Date().getMonth()+1}월 추천 게임</div></div>
+      </div>
+      <div id="monthly-list"></div>`;
+    const q = query(collection(db, "posts"), where("category","==","share"), orderBy("totalVotes","desc"));
+    const snap = await getDocs(q);
+    const el = document.getElementById("monthly-list");
+    if (!el) return;
+    const top = snap.docs.slice(0,5);
+    if (top.length === 0) { el.innerHTML = `<div class="empty-state">이달의 게임이 아직 없습니다. 게임을 공유하고 추천을 받아보세요!</div>`; return; }
+    el.innerHTML = top.map((d,i) => {
+      const p = d.data();
+      return `<div class="game-card monthly-card" onclick="openPost('${d.id}','share')">
+        <div class="monthly-rank">${i+1}</div>
+        <div class="thumb">${p.thumbnail?`<img src="${p.thumbnail}" style="width:100%;height:100%;object-fit:cover;border-radius:var(--border-radius-md)">`:`<div class="thumb-default">No<br>Image</div>`}</div>
+        <div class="game-info">
+          <div class="game-title">${escHtml(p.title)}</div>
+          <div class="game-meta"><span>${escHtml(p.author||"")}</span></div>
+          <div class="game-desc">${escHtml(p.description||"")}</div>
+        </div>
+        <div class="monthly-votes">
+          <div style="font-size:20px;font-weight:500">${(p.totalVotes||0)}</div>
+          <div style="font-size:11px;color:var(--color-text-secondary)">총 추천</div>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  // ─── 도움말 ───
+  function renderHelp(main) {
+    main.innerHTML = `
+      <div class="page-header"><div><div class="page-title">도움말</div><div class="page-sub">쉐블로 이용 안내</div></div></div>
+      <div class="help-list">
+        ${[
+          ["회원가입은 어떻게 하나요?","우측 상단의 '회원가입' 버튼을 클릭하고 아이디와 비밀번호를 입력하면 가입됩니다. 이메일 없이 아이디만으로 가입 가능합니다."],
+          ["게임은 어떻게 등록하나요?","로그인 후 '게임공유' 탭에서 '게임 등록' 버튼을 클릭하세요. 게임 이름, 로블록스 링크, 설명, 썸네일을 입력할 수 있습니다."],
+          ["추천(아이디어/퀄리티/재미)은 어떻게 작동하나요?","각 게임 카드의 버튼을 클릭해 추천할 수 있습니다. 1인 1회만 누를 수 있으며, 세 가지 중 하나만 선택 가능합니다."],
+          ["채팅방은 어떻게 만드나요?","채팅방 탭에서 '채팅방 만들기' 버튼을 클릭하세요. 누구나 채팅방을 만들 수 있습니다."],
+          ["개발자 인증은 무엇인가요?","설정 탭에서 개발자 인증을 신청할 수 있습니다. 인증 후 프로필에 개발자 뱃지가 표시됩니다."],
+        ].map(([q,a]) => `<div class="help-item"><div class="help-q">${q}</div><div class="help-a">${a}</div></div>`).join("")}
+      </div>`;
+  }
+
+  // ─── 채팅 ───
+  async function renderChatList(main) {
+    main.innerHTML = `
+      <div class="page-header">
+        <div><div class="page-title">채팅방</div><div class="page-sub">실시간 채팅</div></div>
+        ${currentUser ? `<button class="btn-sm primary" onclick="createChatRoom()">+ 채팅방 만들기</button>` : `<button class="btn-sm" onclick="openModal('login-modal')">로그인 후 입장</button>`}
+      </div>
+      <div id="chat-room-list"></div>`;
+    const q = query(collection(db, "chatRooms"), orderBy("lastActive","desc"));
+    onSnapshot(q, snap => {
+      const el = document.getElementById("chat-room-list");
+      if (!el) return;
+      if (snap.empty) { el.innerHTML = `<div class="empty-state">채팅방이 없습니다. 첫 번째 채팅방을 만들어보세요!</div>`; return; }
+      el.innerHTML = snap.docs.map(d => {
+        const r = d.data();
+        return `<div class="chat-room-card" onclick="enterChatRoom('${d.id}','${escHtml(r.name||"")}')">
+          <div class="chat-room-info">
+            <div class="chat-room-name">${escHtml(r.name||"채팅방")}</div>
+            <div class="chat-room-meta">${escHtml(r.createdBy||"")} 개설 · ${r.memberCount||0}명</div>
+            <div class="chat-room-last">${escHtml(r.lastMessage||"")}</div>
+          </div>
+          <div class="chat-room-time">${fmtDate(r.lastActive)}</div>
+        </div>`;
+      }).join("");
+    });
+  }
+
+  window.createChatRoom = async () => {
+    if (!currentUser) { openModal("login-modal"); return; }
+    const name = prompt("채팅방 이름을 입력하세요");
+    if (!name || !name.trim()) return;
+    await addDoc(collection(db, "chatRooms"), {
+      name: name.trim(),
+      createdBy: currentUser.displayName || currentUser.email.split("@")[0],
+      createdById: currentUser.uid,
+      memberCount: 1,
+      lastActive: serverTimestamp(),
+      lastMessage: ""
+    });
+  };
+
+  window.enterChatRoom = async (roomId, roomName) => {
+    if (!currentUser) { openModal("login-modal"); return; }
+    activeChatRoom = roomId;
+    const main = document.getElementById("main-content");
+    main.innerHTML = `
+      <div class="page-header">
+        <button class="btn-sm" onclick="setActivePage('chat')">← 채팅방 목록</button>
+        <div class="page-title" style="margin:0">${escHtml(roomName)}</div>
+      </div>
+      <div id="chat-messages" class="chat-messages"></div>
+      <div class="chat-input-bar">
+        <input id="chat-input" class="form-input" placeholder="메시지를 입력하세요..." onkeydown="if(event.key==='Enter')sendChat('${roomId}')">
+        <button class="btn-sm primary" onclick="sendChat('${roomId}')">전송</button>
+      </div>`;
+    const q = query(collection(db, "chatRooms", roomId, "messages"), orderBy("createdAt","asc"));
+    chatUnsubscribe = onSnapshot(q, snap => {
+      const el = document.getElementById("chat-messages");
+      if (!el) return;
+      el.innerHTML = snap.docs.map(d => {
+        const m = d.data();
+        const isMe = currentUser && m.authorId === currentUser.uid;
+        return `<div class="chat-msg ${isMe?'me':'them'}">
+          ${!isMe ? `<div class="chat-author">${escHtml(m.author||"")}</div>` : ""}
+          <div class="chat-bubble">${escHtml(m.text||"")}</div>
+          <div class="chat-time">${fmtDate(m.createdAt)}</div>
+        </div>`;
+      }).join("");
+      el.scrollTop = el.scrollHeight;
+    });
+  };
+
+  window.sendChat = async (roomId) => {
+    const input = document.getElementById("chat-input");
+    const text = input.value.trim();
+    if (!text || !currentUser) return;
+    input.value = "";
+    const author = currentUser.displayName || currentUser.email.split("@")[0];
+    await addDoc(collection(db, "chatRooms", roomId, "messages"), {
+      text, authorId: currentUser.uid, author, createdAt: serverTimestamp()
+    });
+    await updateDoc(doc(db, "chatRooms", roomId), {
+      lastActive: serverTimestamp(), lastMessage: text.substring(0,30)
+    });
+  };
+
+  // ─── 설정 ───
+  function renderSettings(main) {
+    const isDev = currentUser ? false : false;
+    main.innerHTML = `
+      <div class="page-header"><div><div class="page-title">설정</div></div></div>
+      <div class="settings-list">
+        <div class="settings-item">
+          <div class="settings-info">
+            <div class="settings-label">테마</div>
+            <div class="settings-desc">화면 밝기 설정</div>
+          </div>
+          <button class="btn-sm" onclick="toggleTheme()" id="theme-toggle-label">${isDark?"다크 모드":"라이트 모드"}</button>
+        </div>
+        ${currentUser ? `
+        <div class="settings-item">
+          <div class="settings-info">
+            <div class="settings-label">개발자 인증</div>
+            <div class="settings-desc">로블록스 개발자 뱃지 신청</div>
+          </div>
+          <button class="btn-sm" onclick="requestDevBadge()">인증 신청</button>
+        </div>
+        <div class="settings-item">
+          <div class="settings-info">
+            <div class="settings-label">계정</div>
+            <div class="settings-desc">${currentUser.displayName || currentUser.email}</div>
+          </div>
+          <button class="btn-sm danger" onclick="doSignOut()">로그아웃</button>
+        </div>` : `
+        <div class="settings-item">
+          <div class="settings-info">
+            <div class="settings-label">계정</div>
+            <div class="settings-desc">로그인이 필요합니다</div>
+          </div>
+          <button class="btn-sm primary" onclick="openModal('login-modal')">로그인</button>
+        </div>`}
+      </div>`;
+  }
+
+  window.requestDevBadge = async () => {
+    if (!currentUser) return;
+    await updateDoc(doc(db, "users", currentUser.uid), { devBadgePending: true });
+    alert("개발자 인증 신청이 완료됐습니다. 관리자 검토 후 승인됩니다.");
+  };
+
+  // ─── 게시글 작성 모달 ───
+  window.openWriteModal = (category) => {
+    if (!currentUser) { openModal("login-modal"); return; }
+    const isGame = category === "share";
+    document.getElementById("write-modal-title").textContent = isGame ? "게임 등록" : "글 작성";
+    document.getElementById("write-link-group").style.display = isGame ? "" : "none";
+    document.getElementById("write-thumb-group").style.display = isGame ? "" : "none";
+    document.getElementById("write-category").value = category;
+    openModal("write-modal");
+  };
+
+  window.submitPost = async () => {
+    if (!currentUser) return;
+    const title = document.getElementById("write-title").value.trim();
+    const desc = document.getElementById("write-desc").value.trim();
+    const link = document.getElementById("write-link").value.trim();
+    const category = document.getElementById("write-category").value;
+    const thumbFile = document.getElementById("write-thumb").files[0];
+    const err = document.getElementById("write-err");
+
+    if (!title) { err.textContent = "제목을 입력하세요."; return; }
+    err.textContent = "";
+
+    let thumbnail = "";
+    if (thumbFile) {
+      const storageRef = ref(storage, `thumbnails/${Date.now()}_${thumbFile.name}`);
+      await uploadBytes(storageRef, thumbFile);
+      thumbnail = await getDownloadURL(storageRef);
+    }
+
+    const author = currentUser.displayName || currentUser.email.split("@")[0];
+    await addDoc(collection(db, "posts"), {
+      title, description: desc, link, thumbnail, category,
+      author, authorId: currentUser.uid,
+      views: 0, idea: 0, quality: 0, fun: 0, totalVotes: 0,
+      voters: {}, createdAt: serverTimestamp()
+    });
+
+    closeModal("write-modal");
+    document.getElementById("write-title").value = "";
+    document.getElementById("write-desc").value = "";
+    document.getElementById("write-link").value = "";
+    document.getElementById("write-thumb").value = "";
+    renderPage(category);
+  };
+
+  // ─── 유틸 ───
+  window.openModal = (id) => document.getElementById(id).classList.add("open");
+  window.closeModal = (id) => document.getElementById(id).classList.remove("open");
+  window.renderPage = renderPage;
+  window.setActivePage = setActivePage;
+
+  document.addEventListener("click", e => {
+    if (e.target.classList.contains("modal-bg")) e.target.classList.remove("open");
+  });
+
+  function escHtml(str) {
+    if (!str) return "";
+    return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function fmtDate(ts) {
+    if (!ts) return "";
+    const d = ts.toDate ? ts.toDate() : new Date(ts);
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 60000) return "방금 전";
+    if (diff < 3600000) return `${Math.floor(diff/60000)}분 전`;
+    if (diff < 86400000) return `${Math.floor(diff/3600000)}시간 전`;
+    return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,"0")}.${String(d.getDate()).padStart(2,"0")}`;
+  }
 </script>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
 
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{--sidebar-w:210px;--header-h:52px}
+[data-theme="dark"]{color-scheme:dark}
+body{font-family:'Noto Sans KR',sans-serif;background:var(--color-background-tertiary,#f5f5f0);color:var(--color-text-primary,#1a1a1a);min-height:100vh;font-size:14px}
+#app{display:flex;flex-direction:column;min-height:100vh}
 
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-        }
+/* ─ 헤더 ─ */
+header{height:var(--header-h);background:var(--color-background-primary,#fff);border-bottom:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));display:flex;align-items:center;padding:0 20px;gap:12px;position:sticky;top:0;z-index:100}
+.logo{font-size:17px;font-weight:700;letter-spacing:-0.5px;cursor:pointer}
+.logo-sub{font-size:12px;color:var(--color-text-tertiary,#999);font-weight:400;margin-left:4px}
+#auth-area{margin-left:auto;display:flex;align-items:center;gap:8px}
+.user-chip{font-size:13px;font-weight:500;color:var(--color-text-secondary,#666);padding:4px 10px;background:var(--color-background-secondary,#f0f0ea);border-radius:20px}
 
-        header {
-            text-align: center;
-            color: white;
-            margin-bottom: 30px;
-        }
+/* ─ 버튼 ─ */
+.btn-sm{padding:6px 14px;font-size:13px;border:0.5px solid var(--color-border-secondary,rgba(0,0,0,0.25));border-radius:8px;background:transparent;color:var(--color-text-primary,#1a1a1a);cursor:pointer;font-family:'Noto Sans KR',sans-serif;transition:all 0.15s}
+.btn-sm:hover{background:var(--color-background-secondary,#f0f0ea)}
+.btn-sm.primary{background:var(--color-text-primary,#1a1a1a);color:var(--color-background-primary,#fff);border-color:var(--color-text-primary,#1a1a1a)}
+.btn-sm.primary:hover{opacity:0.8}
+.btn-sm.danger{color:#c0392b;border-color:#c0392b}
+.btn-sm.danger:hover{background:#fdf2f2}
+.link{color:var(--color-text-info,#185FA5);cursor:pointer;text-decoration:underline}
 
-        header h1 {
-            font-size: 2.5rem;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
-        }
+/* ─ 레이아웃 ─ */
+.layout{display:flex;flex:1}
+aside{width:var(--sidebar-w);background:var(--color-background-primary,#fff);border-right:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));padding:16px 0;display:flex;flex-direction:column;position:sticky;top:var(--header-h);height:calc(100vh - var(--header-h));overflow-y:auto}
+.nav-label{font-size:10px;color:var(--color-text-tertiary,#999);padding:8px 16px 4px;letter-spacing:0.8px;text-transform:uppercase}
+.nav-item{display:flex;align-items:center;gap:8px;padding:9px 16px;font-size:13px;cursor:pointer;color:var(--color-text-secondary,#666);border-left:2px solid transparent;transition:all 0.12s;user-select:none}
+.nav-item:hover{background:var(--color-background-secondary,#f5f5f0);color:var(--color-text-primary,#1a1a1a)}
+.nav-item.active{background:var(--color-background-secondary,#f5f5f0);color:var(--color-text-primary,#1a1a1a);border-left-color:var(--color-text-primary,#1a1a1a);font-weight:500}
+.nav-dot{width:5px;height:5px;border-radius:50%;background:currentColor;opacity:0.3;flex-shrink:0}
+.nav-item.active .nav-dot{opacity:1}
+.nav-spacer{flex:1}
 
-        header p {
-            opacity: 0.9;
-        }
+/* ─ 메인 ─ */
+.main{flex:1;padding:24px 28px;max-width:860px}
+.loading{padding:40px;text-align:center;color:var(--color-text-tertiary,#999);font-size:13px}
+.empty-state{padding:48px;text-align:center;color:var(--color-text-tertiary,#999);font-size:13px;background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:12px;margin-top:8px}
 
-        .stats {
-            display: flex;
-            justify-content: center;
-            gap: 30px;
-            margin-top: 15px;
-        }
+/* ─ 페이지 헤더 ─ */
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:12px}
+.page-title{font-size:16px;font-weight:500}
+.page-sub{font-size:12px;color:var(--color-text-secondary,#888);margin-top:2px}
 
-        .stat-item {
-            background: rgba(255,255,255,0.2);
-            padding: 10px 20px;
-            border-radius: 20px;
-            font-size: 0.9rem;
-        }
+/* ─ 필터 ─ */
+.filter-bar{display:flex;gap:6px;margin-bottom:14px}
+.filter-chip{padding:5px 12px;font-size:12px;border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:20px;background:transparent;cursor:pointer;color:var(--color-text-secondary,#888);font-family:'Noto Sans KR',sans-serif;transition:all 0.12s}
+.filter-chip.active{background:var(--color-text-primary,#1a1a1a);color:var(--color-background-primary,#fff);border-color:var(--color-text-primary,#1a1a1a)}
 
-        .write-section {
-            background: white;
-            border-radius: 16px;
-            padding: 25px;
-            margin-bottom: 20px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
-        }
+/* ─ 게임 카드 ─ */
+.game-list,.game-card+.game-card{margin-top:8px}
+.game-card{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:12px;padding:14px 16px;display:grid;grid-template-columns:80px 1fr auto;gap:14px;cursor:pointer;transition:border-color 0.12s;margin-bottom:8px}
+.game-card:hover{border-color:var(--color-border-secondary,rgba(0,0,0,0.25))}
+.thumb{width:80px;height:60px;border-radius:8px;background:var(--color-background-secondary,#f5f5f0);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));overflow:hidden;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.thumb-default{font-size:10px;color:var(--color-text-tertiary,#bbb);text-align:center;line-height:1.5}
+.game-info{min-width:0}
+.game-title{font-size:14px;font-weight:500;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.game-meta{font-size:11px;color:var(--color-text-secondary,#888);display:flex;align-items:center;gap:6px;margin-bottom:5px;flex-wrap:wrap}
+.meta-sep{opacity:0.35}
+.game-link{color:var(--color-text-info,#185FA5);text-decoration:none;font-size:11px}
+.game-link:hover{text-decoration:underline}
+.game-desc{font-size:12px;color:var(--color-text-secondary,#888);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.game-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0}
+.stats-col{display:flex;flex-direction:column;gap:5px}
+.stat-btn{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--color-text-secondary,#888);padding:4px 8px;border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:20px;background:transparent;cursor:pointer;font-family:'Noto Sans KR',sans-serif;transition:all 0.12s;white-space:nowrap}
+.stat-btn:hover{border-color:var(--color-border-secondary,rgba(0,0,0,0.25));color:var(--color-text-primary,#1a1a1a)}
+.stat-btn.voted{background:var(--color-background-secondary,#f5f5f0);color:var(--color-text-primary,#1a1a1a);border-color:var(--color-border-primary,rgba(0,0,0,0.4));font-weight:500}
+.stat-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.dot-idea{background:#378ADD}.dot-quality{background:#1D9E75}.dot-fun{background:#D4537E}
 
-        .write-section h2 {
-            color: #333;
-            margin-bottom: 15px;
-            font-size: 1.2rem;
-        }
+/* ─ 공지 ─ */
+.announce-card{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:10px;padding:12px 16px;margin-bottom:8px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:border-color 0.12s}
+.announce-card:hover{border-color:var(--color-border-secondary,rgba(0,0,0,0.25))}
+.announce-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:var(--color-text-primary,#1a1a1a);color:var(--color-background-primary,#fff);flex-shrink:0}
+.announce-title{font-size:13px;font-weight:500}
+.announce-date{font-size:11px;color:var(--color-text-tertiary,#bbb);margin-left:auto;flex-shrink:0}
 
-        .input-group {
-            margin-bottom: 15px;
-        }
+/* ─ 목록형 ─ */
+.list-row{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:10px;padding:13px 16px;margin-bottom:7px;cursor:pointer;transition:border-color 0.12s}
+.list-row:hover{border-color:var(--color-border-secondary,rgba(0,0,0,0.25))}
+.list-title{font-size:13px;font-weight:500;margin-bottom:5px}
+.list-meta{font-size:11px;color:var(--color-text-tertiary,#bbb);display:flex;gap:10px}
 
-        .input-group label {
-            display: block;
-            margin-bottom: 5px;
-            color: #666;
-            font-size: 0.9rem;
-        }
+/* ─ 게시물 상세 ─ */
+.post-detail{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:12px;padding:24px}
+.post-title{font-size:18px;font-weight:500;margin-bottom:10px}
+.post-meta{font-size:12px;color:var(--color-text-secondary,#888);display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.post-thumb{width:100%;max-height:320px;object-fit:cover;border-radius:8px;margin-bottom:16px}
+.post-body{font-size:14px;line-height:1.8;color:var(--color-text-primary,#1a1a1a);white-space:pre-wrap;margin-bottom:24px}
+.vote-section{display:flex;gap:10px;margin-bottom:24px;padding:16px;background:var(--color-background-secondary,#f5f5f0);border-radius:10px}
+.vote-big{display:flex;align-items:center;gap:6px;padding:8px 16px;border:0.5px solid var(--color-border-secondary,rgba(0,0,0,0.2));border-radius:8px;background:var(--color-background-primary,#fff);cursor:pointer;font-family:'Noto Sans KR',sans-serif;font-size:13px;color:var(--color-text-secondary,#888);transition:all 0.12s}
+.vote-big:hover{border-color:var(--color-border-primary,rgba(0,0,0,0.4));color:var(--color-text-primary,#1a1a1a)}
+.vote-big.voted{border-color:var(--color-text-primary,#1a1a1a);background:var(--color-background-secondary,#f5f5f0);color:var(--color-text-primary,#1a1a1a)}
+.vote-dot{width:8px;height:8px;border-radius:50%}
 
-        .input-group input {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 1rem;
-            transition: border-color 0.3s;
-        }
+/* ─ 댓글 ─ */
+.comments-section{border-top:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));padding-top:20px}
+.comments-title{font-size:14px;font-weight:500;margin-bottom:14px}
+.comment-item{padding:10px 0;border-bottom:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.07));display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.comment-author{font-size:12px;font-weight:500;flex-shrink:0}
+.comment-text{font-size:13px;flex:1}
+.comment-date{font-size:11px;color:var(--color-text-tertiary,#bbb);flex-shrink:0}
+.comment-del{font-size:11px;color:#c0392b;cursor:pointer}
+.comment-form{display:flex;gap:8px;margin-top:14px}
+.comment-form .form-input{flex:1}
 
-        .input-group input:focus {
-            outline: none;
-            border-color: #667eea;
-        }
+/* ─ 채팅 ─ */
+.chat-room-card{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:10px;padding:14px 16px;margin-bottom:8px;cursor:pointer;display:flex;align-items:center;gap:12px;transition:border-color 0.12s}
+.chat-room-card:hover{border-color:var(--color-border-secondary,rgba(0,0,0,0.25))}
+.chat-room-info{flex:1;min-width:0}
+.chat-room-name{font-size:14px;font-weight:500;margin-bottom:3px}
+.chat-room-meta{font-size:11px;color:var(--color-text-secondary,#888);margin-bottom:3px}
+.chat-room-last{font-size:12px;color:var(--color-text-secondary,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chat-room-time{font-size:11px;color:var(--color-text-tertiary,#bbb);flex-shrink:0}
+.chat-messages{height:calc(100vh - 260px);overflow-y:auto;padding:12px 0;display:flex;flex-direction:column;gap:8px}
+.chat-msg{display:flex;flex-direction:column;max-width:65%}
+.chat-msg.me{align-self:flex-end;align-items:flex-end}
+.chat-msg.them{align-self:flex-start;align-items:flex-start}
+.chat-author{font-size:11px;color:var(--color-text-secondary,#888);margin-bottom:3px}
+.chat-bubble{padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.5;word-break:break-word}
+.chat-msg.me .chat-bubble{background:var(--color-text-primary,#1a1a1a);color:var(--color-background-primary,#fff);border-radius:12px 12px 2px 12px}
+.chat-msg.them .chat-bubble{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:12px 12px 12px 2px}
+.chat-time{font-size:10px;color:var(--color-text-tertiary,#bbb);margin-top:3px}
+.chat-input-bar{display:flex;gap:8px;padding:12px 0 0;border-top:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1))}
+.chat-input-bar .form-input{flex:1}
 
-        .input-group textarea {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 1rem;
-            resize: vertical;
-            min-height: 100px;
-            transition: border-color 0.3s;
-        }
+/* ─ 이달의 게임 ─ */
+.monthly-card{grid-template-columns:32px 80px 1fr auto!important}
+.monthly-rank{font-size:18px;font-weight:700;color:var(--color-text-tertiary,#bbb);display:flex;align-items:center;justify-content:center}
+.monthly-card:nth-child(1) .monthly-rank{color:#B8860B}
+.monthly-card:nth-child(2) .monthly-rank{color:#808080}
+.monthly-card:nth-child(3) .monthly-rank{color:#A0522D}
+.monthly-votes{display:flex;flex-direction:column;align-items:center;justify-content:center;min-width:60px}
 
-        .input-group textarea:focus {
-            outline: none;
-            border-color: #667eea;
-        }
+/* ─ 도움말 ─ */
+.help-list{display:flex;flex-direction:column;gap:10px}
+.help-item{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:10px;padding:16px}
+.help-q{font-size:13px;font-weight:500;margin-bottom:7px}
+.help-a{font-size:13px;color:var(--color-text-secondary,#888);line-height:1.6}
 
-        .submit-btn {
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            font-size: 1.1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
+/* ─ 설정 ─ */
+.settings-list{display:flex;flex-direction:column;gap:8px;max-width:420px}
+.settings-item{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:10px;padding:14px 16px;display:flex;align-items:center;gap:12px}
+.settings-info{flex:1}
+.settings-label{font-size:13px;font-weight:500}
+.settings-desc{font-size:12px;color:var(--color-text-secondary,#888);margin-top:2px}
 
-        .submit-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
-        }
+/* ─ 폼 ─ */
+.form-group{margin-bottom:13px}
+.form-label{font-size:12px;color:var(--color-text-secondary,#888);margin-bottom:4px;display:block}
+.form-input{width:100%;padding:8px 11px;font-size:13px;border:0.5px solid var(--color-border-secondary,rgba(0,0,0,0.25));border-radius:8px;background:var(--color-background-primary,#fff);color:var(--color-text-primary,#1a1a1a);font-family:'Noto Sans KR',sans-serif;outline:none;transition:border-color 0.12s}
+.form-input:focus{border-color:var(--color-border-primary,rgba(0,0,0,0.5))}
+.form-err{font-size:12px;color:#c0392b;margin-top:8px;min-height:16px}
+.form-row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
 
-        .sort-section {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-        }
-
-        .sort-section h2 {
-            color: white;
-            font-size: 1.3rem;
-        }
-
-        .sort-buttons {
-            display: flex;
-            gap: 10px;
-        }
-
-        .sort-btn {
-            padding: 8px 16px;
-            border: 2px solid white;
-            background: transparent;
-            color: white;
-            border-radius: 20px;
-            cursor: pointer;
-            transition: all 0.3s;
-            font-size: 0.9rem;
-        }
-
-        .sort-btn.active {
-            background: white;
-            color: #667eea;
-        }
-
-        .sort-btn:hover {
-            background: rgba(255,255,255,0.2);
-        }
-
-        .comments-list {
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-
-        .comment-card {
-            background: white;
-            border-radius: 16px;
-            padding: 20px;
-            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-            transition: transform 0.2s;
-            position: relative;
-        }
-
-        .comment-card:hover {
-            transform: translateY(-3px);
-        }
-
-        .comment-card.top-comment {
-            border: 3px solid #ffd700;
-            background: linear-gradient(135deg, #fff9e6 0%, #fff 100%);
-        }
-
-        .top-badge {
-            position: absolute;
-            top: -10px;
-            right: 20px;
-            background: linear-gradient(135deg, #ffd700 0%, #ffb300 100%);
-            color: #333;
-            padding: 5px 15px;
-            border-radius: 15px;
-            font-size: 0.8rem;
-            font-weight: 700;
-        }
-
-        .comment-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-        }
-
-        .comment-author {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .avatar {
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: 700;
-            font-size: 1.1rem;
-        }
-
-        .author-info h3 {
-            color: #333;
-            font-size: 1rem;
-        }
-
-        .author-info span {
-            color: #999;
-            font-size: 0.8rem;
-        }
-
-        .comment-content {
-            color: #444;
-            line-height: 1.7;
-            margin-bottom: 15px;
-            font-size: 1rem;
-        }
-
-        .comment-actions {
-            display: flex;
-            gap: 15px;
-            align-items: center;
-        }
-
-        .like-btn {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 16px;
-            border: 2px solid #e0e0e0;
-            background: white;
-            border-radius: 25px;
-            cursor: pointer;
-            transition: all 0.3s;
-            font-size: 0.95rem;
-        }
-
-        .like-btn:hover {
-            border-color: #e74c3c;
-            background: #fff5f5;
-        }
-
-        .like-btn.liked {
-            border-color: #e74c3c;
-            background: #e74c3c;
-            color: white;
-        }
-
-        .like-btn .heart {
-            font-size: 1.2rem;
-            transition: transform 0.2s;
-        }
-
-        .like-btn:hover .heart {
-            transform: scale(1.2);
-        }
-
-        .like-btn.liked .heart {
-            animation: heartBeat 0.5s ease;
-        }
-
-        @keyframes heartBeat {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.3); }
-        }
-
-        .delete-btn {
-            padding: 8px 12px;
-            border: none;
-            background: #f0f0f0;
-            color: #999;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 0.85rem;
-            transition: all 0.3s;
-        }
-
-        .delete-btn:hover {
-            background: #e74c3c;
-            color: white;
-        }
-
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            background: white;
-            border-radius: 16px;
-            color: #999;
-        }
-
-        .empty-state .icon {
-            font-size: 4rem;
-            margin-bottom: 15px;
-        }
-
-        .char-count {
-            text-align: right;
-            font-size: 0.85rem;
-            color: #999;
-            margin-top: 5px;
-        }
-
-        @media (max-width: 600px) {
-            header h1 {
-                font-size: 1.8rem;
-            }
-
-            .stats {
-                flex-direction: column;
-                gap: 10px;
-            }
-
-            .sort-section {
-                flex-direction: column;
-                gap: 15px;
-                align-items: flex-start;
-            }
-
-            .comment-header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 10px;
-            }
-        }
-    </style>
+/* ─ 모달 ─ */
+.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:500;display:none;align-items:center;justify-content:center}
+.modal-bg.open{display:flex}
+.modal{background:var(--color-background-primary,#fff);border:0.5px solid var(--color-border-tertiary,rgba(0,0,0,0.1));border-radius:16px;padding:24px;width:400px;max-width:92vw;max-height:90vh;overflow-y:auto}
+.modal-title{font-size:15px;font-weight:500;margin-bottom:18px}
+</style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>댓글들</h1>
-            <p>자유롭게 의견을 나누고 공감해주세요</p>
-            <div class="stats">
-                <div class="stat-item"> 총 댓글 <strong id="totalComments">0</strong>개</div>
-                <div class="stat-item"> 총 좋아요 <strong id="totalLikes">0</strong>개</div>
-            </div>
-        </header>
+<div id="app">
+  <header>
+    <div class="logo" onclick="setActivePage('share')" id="site-name">쉐블로<span class="logo-sub">로블록스 게임 공유</span></div>
+    <div id="auth-area"></div>
+  </header>
+  <div class="layout">
+    <aside>
+      <div>
+        <div class="nav-label">게시판</div>
+        <div class="nav-item active" data-page="share"><div class="nav-dot"></div>게임공유 (로블)</div>
+        <div class="nav-item" data-page="notice"><div class="nav-dot"></div>공지</div>
+        <div class="nav-item" data-page="qna"><div class="nav-dot"></div>질문</div>
+        <div class="nav-item" data-page="monthly"><div class="nav-dot"></div>이달의 게임</div>
+        <div class="nav-item" data-page="help"><div class="nav-dot"></div>도움말</div>
+      </div>
+      <div style="margin-top:16px">
+        <div class="nav-label">소통</div>
+        <div class="nav-item" data-page="chat"><div class="nav-dot"></div>채팅방</div>
+      </div>
+      <div class="nav-spacer"></div>
+      <div>
+        <div class="nav-item" data-page="settings"><div class="nav-dot"></div>설정</div>
+      </div>
+    </aside>
+    <main class="main" id="main-content">
+      <div class="loading">불러오는 중...</div>
+    </main>
+  </div>
+</div>
 
-        <section class="write-section">
-            <h2>댓글 작성</h2>
-            <div class="input-group">
-                <label for="nickname">닉네임</label>
-                <input type="text" id="nickname" placeholder="닉네임을 입력하세요" maxlength="20">
-            </div>
-            <div class="input-group">
-                <label for="content">내용</label>
-                <textarea id="content" placeholder="댓글을 입력하세요..." maxlength="500"></textarea>
-                <div class="char-count"><span id="charCount">0</span>/500</div>
-            </div>
-            <button class="submit-btn" onclick="addComment()">댓글 등록</button>
-        </section>
-
-        <div class="sort-section">
-            <h2>목록</h2>
-            <div class="sort-buttons">
-                <button class="sort-btn active" onclick="sortComments('likes')" id="sortLikes">🔥 인기순</button>
-                <button class="sort-btn" onclick="sortComments('latest')" id="sortLatest">🕐 최신순</button>
-            </div>
-        </div>
-
-        <div class="comments-list" id="commentsList">
-            <!-- 댓글이 여기에 표시됩니다 -->
-        </div>
+<!-- 로그인 모달 -->
+<div class="modal-bg" id="login-modal">
+  <div class="modal">
+    <div class="modal-title">로그인</div>
+    <div class="form-group">
+      <label class="form-label">아이디</label>
+      <input id="login-id" class="form-input" type="text" placeholder="아이디 입력" onkeydown="if(event.key==='Enter')doLogin()">
     </div>
+    <div class="form-group">
+      <label class="form-label">비밀번호</label>
+      <input id="login-pw" class="form-input" type="password" placeholder="비밀번호 입력" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <div class="form-err" id="login-err"></div>
+    <div class="form-row">
+      <button class="btn-sm" onclick="closeModal('login-modal')">취소</button>
+      <button class="btn-sm primary" onclick="doLogin()">로그인</button>
+    </div>
+    <div style="text-align:center;margin-top:14px;font-size:12px;color:var(--color-text-secondary)">
+      계정이 없으신가요? <span class="link" onclick="closeModal('login-modal');openModal('register-modal')">회원가입</span>
+    </div>
+  </div>
+</div>
 
-    <script>
-        // 로컬 스토리지에서 댓글 불러오기
-        let comments = JSON.parse(localStorage.getItem('comments')) || [];
-        let currentSort = 'likes';
-        let likedComments = JSON.parse(localStorage.getItem('likedComments')) || [];
+<!-- 회원가입 모달 -->
+<div class="modal-bg" id="register-modal">
+  <div class="modal">
+    <div class="modal-title">회원가입</div>
+    <div class="form-group">
+      <label class="form-label">아이디</label>
+      <input id="reg-id" class="form-input" type="text" placeholder="사용할 아이디 입력">
+    </div>
+    <div class="form-group">
+      <label class="form-label">비밀번호</label>
+      <input id="reg-pw" class="form-input" type="password" placeholder="비밀번호 (6자 이상)">
+    </div>
+    <div class="form-group">
+      <label class="form-label">비밀번호 확인</label>
+      <input id="reg-pw2" class="form-input" type="password" placeholder="비밀번호 다시 입력" onkeydown="if(event.key==='Enter')doRegister()">
+    </div>
+    <div class="form-err" id="reg-err"></div>
+    <div class="form-row">
+      <button class="btn-sm" onclick="closeModal('register-modal')">취소</button>
+      <button class="btn-sm primary" onclick="doRegister()">가입하기</button>
+    </div>
+  </div>
+</div>
 
-        // 글자 수 카운터
-        document.getElementById('content').addEventListener('input', function() {
-            document.getElementById('charCount').textContent = this.value.length;
-        });
+<!-- 글 작성 모달 -->
+<div class="modal-bg" id="write-modal">
+  <div class="modal">
+    <div class="modal-title" id="write-modal-title">게임 등록</div>
+    <input type="hidden" id="write-category" value="share">
+    <div class="form-group">
+      <label class="form-label">제목 / 게임 이름</label>
+      <input id="write-title" class="form-input" type="text" placeholder="제목을 입력하세요">
+    </div>
+    <div class="form-group" id="write-link-group">
+      <label class="form-label">로블록스 링크</label>
+      <input id="write-link" class="form-input" type="text" placeholder="https://www.roblox.com/games/...">
+    </div>
+    <div class="form-group">
+      <label class="form-label">설명</label>
+      <textarea id="write-desc" class="form-input" rows="4" placeholder="내용을 입력하세요" style="resize:vertical"></textarea>
+    </div>
+    <div class="form-group" id="write-thumb-group">
+      <label class="form-label">썸네일 (선택)</label>
+      <input id="write-thumb" class="form-input" type="file" accept="image/*" style="padding:6px 10px">
+    </div>
+    <div class="form-err" id="write-err"></div>
+    <div class="form-row">
+      <button class="btn-sm" onclick="closeModal('write-modal')">취소</button>
+      <button class="btn-sm primary" onclick="submitPost()">등록하기</button>
+    </div>
+  </div>
+</div>
 
-        // 댓글 추가
-        function addComment() {
-            const nickname = document.getElementById('nickname').value.trim();
-            const content = document.getElementById('content').value.trim();
-
-            if (!nickname) {
-                alert('닉네임을 입력해주세요!');
-                return;
-            }
-
-            if (!content) {
-                alert('댓글 내용을 입력해주세요!');
-                return;
-            }
-
-            const comment = {
-                id: Date.now(),
-                nickname: nickname,
-                content: content,
-                likes: 0,
-                timestamp: new Date().toISOString()
-            };
-
-            comments.unshift(comment);
-            saveComments();
-            renderComments();
-
-            // 입력 필드 초기화
-            document.getElementById('content').value = '';
-            document.getElementById('charCount').textContent = '0';
-        }
-
-        // 좋아요 토글
-        function toggleLike(commentId) {
-            const comment = comments.find(c => c.id === commentId);
-            const likedIndex = likedComments.indexOf(commentId);
-
-            if (likedIndex === -1) {
-                // 좋아요 추가
-                comment.likes++;
-                likedComments.push(commentId);
-            } else {
-                // 좋아요 취소
-                comment.likes--;
-                likedComments.splice(likedIndex, 1);
-            }
-
-            localStorage.setItem('likedComments', JSON.stringify(likedComments));
-            saveComments();
-            renderComments();
-        }
-
-        // 댓글 삭제
-        function deleteComment(commentId) {
-            if (confirm('정말 삭제하시겠습니까?')) {
-                comments = comments.filter(c => c.id !== commentId);
-                saveComments();
-                renderComments();
-            }
-        }
-
-        // 정렬 변경
-        function sortComments(type) {
-            currentSort = type;
-            
-            document.getElementById('sortLikes').classList.remove('active');
-            document.getElementById('sortLatest').classList.remove('active');
-            
-            if (type === 'likes') {
-                document.getElementById('sortLikes').classList.add('active');
-            } else {
-                document.getElementById('sortLatest').classList.add('active');
-            }
-            
-            renderComments();
-        }
-
-        // 댓글 저장
-        function saveComments() {
-            localStorage.setItem('comments', JSON.stringify(comments));
-        }
-
-        // 댓글 렌더링
-        function renderComments() {
-            const list = document.getElementById('commentsList');
-            
-            // 정렬
-            let sortedComments = [...comments];
-            if (currentSort === 'likes') {
-                sortedComments.sort((a, b) => b.likes - a.likes);
-            } else {
-                sortedComments.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-            }
-
-            // 통계 업데이트
-            document.getElementById('totalComments').textContent = comments.length;
-            document.getElementById('totalLikes').textContent = comments.reduce((sum, c) => sum + c.likes, 0);
-
-            if (sortedComments.length === 0) {
-                list.innerHTML = `
-                    <div class="empty-state">
-                        <div class="icon">💭</div>
-                        <p>아직 댓글이 없습니다.<br>첫 번째 댓글을 남겨보세요!</p>
-                    </div>
-                `;
-                return;
-            }
-
-            // 최고 좋아요 댓글 찾기
-            const maxLikes = Math.max(...sortedComments.map(c => c.likes));
-
-            list.innerHTML = sortedComments.map((comment, index) => {
-                const isLiked = likedComments.includes(comment.id);
-                const isTop = currentSort === 'likes' && index === 0 && comment.likes > 0 && comment.likes === maxLikes;
-                const initial = comment.nickname.charAt(0).toUpperCase();
-                const timeAgo = getTimeAgo(comment.timestamp);
-
-                return `
-                    <div class="comment-card ${isTop ? 'top-comment' : ''}">
-                        ${isTop ? '<div class="top-badge"></div>' : ''}
-                        <div class="comment-header">
-                            <div class="comment-author">
-                                <div class="avatar">${initial}</div>
-                                <div class="author-info">
-                                    <h3>${escapeHtml(comment.nickname)}</h3>
-                                    <span>${timeAgo}</span>
-                                </div>
-                            </div>
-                        </div>
-                        <p class="comment-content">${escapeHtml(comment.content)}</p>
-                        <div class="comment-actions">
-                            <button class="like-btn ${isLiked ? 'liked' : ''}" onclick="toggleLike(${comment.id})">
-                                <span class="heart">${isLiked ? '❤️' : '🤍'}</span>
-                                <span>${comment.likes}</span>
-                            </button>
-                            <button class="delete-btn" onclick="deleteComment(${comment.id})">삭제</button>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-        // 시간 표시 변환
-        function getTimeAgo(timestamp) {
-            const now = new Date();
-            const past = new Date(timestamp);
-            const diff = Math.floor((now - past) / 1000);
-
-            if (diff < 60) return '방금 전';
-            if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
-            if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
-            if (diff < 604800) return `${Math.floor(diff / 86400)}일 전`;
-            
-            return past.toLocaleDateString('ko-KR');
-        }
-
-        // HTML 이스케이프
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        // 초기 렌더링
-        renderComments();
-
-        // Enter 키로 댓글 등록 (Shift+Enter는 줄바꿈)
-        document.getElementById('content').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                addComment();
-            }
-        });
-    </script>
 </body>
 </html>
